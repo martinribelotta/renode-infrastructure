@@ -277,6 +277,8 @@ namespace Antmicro.Renode.Peripherals.SD
 
         public bool TreatNextCommandAsAppCommand { get; private set; }
 
+        public bool IsEmmc => emmc;
+
         // JESD84-B51 section 7.4
         private static byte[] BuildExtendedCsd(long capacity, byte bootSizeMult)
         {

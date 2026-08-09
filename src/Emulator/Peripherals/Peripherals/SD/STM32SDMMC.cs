@@ -369,6 +369,12 @@ namespace Antmicro.Renode.Peripherals.SD
             case (SDCardCommand)SDCardAppCommand.SendSDConfigurationRegister_ACMD51:
                 ProcessRead(sdCard, 8);
                 break;
+            case SDCardCommand.SendInterfaceConditionCommand_CMD8:
+                // eMMC-only: CMD8 here is SEND_EXT_CSD (JESD84-B51 Table 49), a single 512 B block read.
+                // The card side (SDCard.HandleCommand) already prepares emmcExtendedCsd for this; the
+                // STM32 controller just needs to pump it like any other block read.
+                ProcessRead(sdCard, 512, true);
+                break;
             }
         }
 
@@ -391,6 +397,14 @@ namespace Antmicro.Renode.Peripherals.SD
                 // Need to delay the data so that firmware never consumes all data before reading the response
                 Machine.LocalTimeSource.ExecuteInNearestSyncedState(_ => ProcessDataCommand(sdCard, command));
                 break;
+            case SDCardCommand.SendInterfaceConditionCommand_CMD8:
+                // On a real SD card CMD8 (SEND_IF_COND) has no data phase - only on eMMC is it
+                // overloaded as SEND_EXT_CSD, which does. See ProcessDataCommand for the read itself.
+                if(sdCard.IsEmmc)
+                {
+                    Machine.LocalTimeSource.ExecuteInNearestSyncedState(_ => ProcessDataCommand(sdCard, command));
+                }
+                break;
             case SDCardCommand.SendCardIdentification_CMD2:
             case SDCardCommand.SendRelativeAddress_CMD3:
             case SDCardCommand.CheckSwitchableFunction_CMD6:
@@ -398,7 +412,6 @@ namespace Antmicro.Renode.Peripherals.SD
             case SDCardCommand.SelectDeselectCard_CMD7:
             case SDCardCommand.StopTransmission_CMD12:
             case SDCardCommand.SetBlockLength_CMD16:
-            case SDCardCommand.SendInterfaceConditionCommand_CMD8:
             case SDCardCommand.AppCommand_CMD55:
             case (SDCardCommand)SDCardAppCommand.SendOperatingConditionRegister_ACMD41:
                 break;
