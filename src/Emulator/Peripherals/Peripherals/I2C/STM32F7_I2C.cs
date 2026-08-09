@@ -363,6 +363,18 @@ namespace Antmicro.Renode.Peripherals.I2C
             {
                 transmitInterruptStatus = true;
             }
+
+            // A 0-byte AUTOEND write (e.g. HAL_I2C_IsDeviceReady's address-only probe: START+AUTOEND+NBYTES=0,
+            // RD_WRN=0) has nothing left to do once the address phase itself ACKs: MasterTransmitDataWrite()
+            // is what normally calls SetTransferCompleteFlags() once all NBYTES have gone out over TXDATA,
+            // but with zero bytes to send it never runs at all, so without this STOPF never gets set (real
+            // hardware would have auto-generated a STOP by now under AUTOEND) and firmware polling for it
+            // times out - even though a real slave answered. Deliberately narrow (write + zero-byte +
+            // AUTOEND only) to leave every other path's existing behavior untouched.
+            if(!isReadTransfer.Value && bytesToTransfer.Value == 0 && autoEnd.Value)
+            {
+                SetTransferCompleteFlags();
+            }
             Update();
         }
 
