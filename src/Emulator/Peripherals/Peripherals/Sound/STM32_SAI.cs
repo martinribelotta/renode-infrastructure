@@ -34,6 +34,8 @@ using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure.Registers;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.Bus;
+using Antmicro.Renode.Peripherals.Timers;
+using Antmicro.Renode.Time;
 
 namespace Antmicro.Renode.Peripherals.Sound
 {
@@ -53,6 +55,24 @@ namespace Antmicro.Renode.Peripherals.Sound
                 writer = new WavPcm32Writer(audioOutputFile, sampleRate, channels);
             }
 
+            // Drives DmaRequest below. This does NOT run at the real 192kHz Fs (see the class
+            // header comment on "content fidelity, not timing fidelity") - nothing on the
+            // firmware side measures wall-clock audio timing, HAL_SAI_Transmit_DMA()/Receive_DMA()
+            // just need their half/complete DMA callbacks to eventually fire so
+            // Platform/Src/Audio.cpp's play/record task loop makes progress instead of hanging
+            // forever on a semaphore. DmaRequestRate (see below, a few kHz) is cheap to simulate on
+            // a non-accelerated software CPU while still moving a meaningful number of samples over
+            // the ~15s virtual boot smoke test.
+            dmaRequestTimer = new LimitTimer(
+                  machine.ClockSource, 1000000, this, "dmaRequestClock",
+                  limit: 1000000 / DmaRequestRate,
+                  eventEnabled: true,
+                  direction: Direction.Ascending,
+                  enabled: false,
+                  autoUpdate: false,
+                  workMode: WorkMode.Periodic);
+            dmaRequestTimer.LimitReached += OnDmaRequestTimerTick;
+
             var registerMap = new Dictionary<long, DoubleWordRegister>
             {
                 {(long)Registers.Configuration1, new DoubleWordRegister(this)
@@ -66,8 +86,8 @@ namespace Antmicro.Renode.Peripherals.Sound
                     .WithFlag(12, name: "MONO")
                     .WithFlag(13, name: "OUTDRIV")
                     .WithReservedBits(14, 2)
-                    .WithFlag(16, out saiEnabled, name: "SAIEN", changeCallback: (_, __) => UpdateInterrupts())
-                    .WithFlag(17, name: "DMAEN")
+                    .WithFlag(16, out saiEnabled, name: "SAIEN", changeCallback: (_, __) => { UpdateInterrupts(); UpdateDmaRequestTimer(); })
+                    .WithFlag(17, out dmaEnabled, name: "DMAEN", changeCallback: (_, __) => UpdateDmaRequestTimer())
                     .WithReservedBits(18, 1)
                     .WithFlag(19, name: "NODIV")
                     .WithValueField(20, 6, name: "MCKDIV")
@@ -147,6 +167,7 @@ namespace Antmicro.Renode.Peripherals.Sound
         {
             registers.Reset();
             IRQ.Set(false);
+            dmaRequestTimer.Reset();
         }
 
         public uint ReadDoubleWord(long offset)
@@ -170,6 +191,13 @@ namespace Antmicro.Renode.Peripherals.Sound
         public long Size => 0x20;
 
         public GPIO IRQ { get; }
+
+        // Pulsed periodically (see dmaRequestTimer, constructor) while SAIEN and DMAEN are both
+        // set, so a DMA controller wired to it (dmamux1, see the platform .repl) keeps performing
+        // peripheral<->memory transfers for as long as the firmware's circular-mode DMA stream is
+        // running - unlike STM32_ADC's DMARequest (one pulse per one-shot conversion), this one
+        // free-runs because SAI1 in this firmware is always started in circular DMA mode.
+        public GPIO DmaRequest { get; } = new GPIO();
 
         // MODE[0] distinguishes transmitter (0: master/slave TX) from receiver (1: master/slave RX),
         // matching SAI_xCR1_MODE encoding (00 Master Tx, 01 Master Rx, 10 Slave Tx, 11 Slave Rx).
@@ -205,13 +233,37 @@ namespace Antmicro.Renode.Peripherals.Sound
             IRQ.Set(saiEnabled.Value && freqInterruptEnabled.Value);
         }
 
+        private void UpdateDmaRequestTimer()
+        {
+            dmaRequestTimer.Enabled = saiEnabled.Value && dmaEnabled.Value;
+        }
+
+        private void OnDmaRequestTimerTick()
+        {
+            // Issue DMA peripheral request, which when mapped to a DMA controller stream
+            // (dmamux1, see the platform .repl) will trigger a peripheral<->memory transfer.
+            // WorkMode.Periodic re-arms this on its own (no manual re-enable needed here,
+            // unlike STM32_ADC's OneShot mode) - it keeps firing until UpdateDmaRequestTimer()
+            // stops it, i.e. until SAIEN or DMAEN goes low.
+            DmaRequest.Set();
+            DmaRequest.Unset();
+        }
+
         private readonly DoubleWordRegisterCollection registers;
         private readonly WavPcm32Reader reader;
         private readonly WavPcm32Writer writer;
+        private readonly LimitTimer dmaRequestTimer;
         private readonly IValueRegisterField mode;
         private readonly IFlagRegisterField saiEnabled;
+        private readonly IFlagRegisterField dmaEnabled;
         private readonly IFlagRegisterField freqInterruptEnabled;
         private uint lastTransmitted;
+
+        // Virtual DMA-request rate (Hz), deliberately far below the real 192kHz Fs - see the
+        // constructor's comment on dmaRequestTimer for why. 4kHz keeps a ~15s virtual-time boot
+        // smoke test (sim/run.sh) cheap to simulate while still moving tens of thousands of
+        // samples, enough for the firmware's DMA half/complete callbacks to fire repeatedly.
+        private const uint DmaRequestRate = 4000;
 
         private enum Registers
         {
