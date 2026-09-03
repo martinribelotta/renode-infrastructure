@@ -21,6 +21,23 @@ namespace Antmicro.Renode.Peripherals.Sound
     {
         public WavPcm32Reader(string path)
         {
+            Open(path);
+        }
+
+        // Lets a caller swap the file being read without recreating the object (see
+        // STM32_SAI.ReplaceInputFile -- an external script changing the simulated microphone
+        // input at runtime). Disposes the previous stream/reader first; the new file's own
+        // format (channels/bitsPerSample) takes over even if it differs from the old one's,
+        // same as constructing fresh would.
+        public void Reopen(string path)
+        {
+            reader.Dispose();
+            stream.Dispose();
+            Open(path);
+        }
+
+        private void Open(string path)
+        {
             stream = new FileStream(path, FileMode.Open, FileAccess.Read);
             reader = new BinaryReader(stream);
             ParseHeader();
@@ -114,8 +131,8 @@ namespace Antmicro.Renode.Peripherals.Sound
             stream.Position = dataStart;
         }
 
-        private readonly FileStream stream;
-        private readonly BinaryReader reader;
+        private FileStream stream;
+        private BinaryReader reader;
         private int channels;
         private int bitsPerSample;
         private long dataStart;
@@ -139,6 +156,14 @@ namespace Antmicro.Renode.Peripherals.Sound
         {
             writer.Write(value);
             sampleCount++;
+            // Patches the header's RIFF/data sizes after every sample (not just at Dispose())
+            // and flushes to disk, so an external script (http_gui.py's play oscilloscope)
+            // can read this file mid-session and get a valid, currently-accurate WAV rather
+            // than one whose data chunk still claims 0 bytes until Renode quits. A few extra
+            // seeks/flushes per sample is not a concern here -- this simulator's actual
+            // wall-clock sample rate is already low (see STM32_SAI's own DmaRequestRate
+            // comment), nowhere near where this would be a bottleneck.
+            PatchSizes();
         }
 
         public void Dispose()
@@ -174,12 +199,15 @@ namespace Antmicro.Renode.Peripherals.Sound
 
         private void PatchSizes()
         {
+            var endPosition = stream.Position; // where the next WriteSample() should resume
             var dataBytes = (uint)(sampleCount * 4);
             writer.Flush();
             stream.Position = 4;
             writer.Write(36u + dataBytes); // RIFF chunk size = file size - 8
             stream.Position = dataStart - 4;
             writer.Write(dataBytes);
+            writer.Flush();
+            stream.Position = endPosition;
         }
 
         private readonly FileStream stream;

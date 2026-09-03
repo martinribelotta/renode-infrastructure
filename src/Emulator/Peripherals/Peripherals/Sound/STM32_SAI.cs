@@ -190,6 +190,15 @@ namespace Antmicro.Renode.Peripherals.Sound
         // other block, which is registered 0x20 bytes further up the bus (see the platform .repl).
         public long Size => 0x20;
 
+        // Lets an external script (http_gui.py's "load a new wave for record" control) swap
+        // this block's simulated microphone input at runtime, instead of only at Renode
+        // startup via audioInputFile -- e.g. `sysbus.sai1BlockB.ReplaceInputFile(path)`. A
+        // no-op if this block has no reader (i.e. it's a TX/capture block, not RX/input).
+        public void ReplaceInputFile(string path)
+        {
+            reader?.Reopen(path);
+        }
+
         public GPIO IRQ { get; }
 
         // Pulsed periodically (see dmaRequestTimer, constructor) while SAIEN and DMAEN are both
